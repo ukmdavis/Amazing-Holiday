@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Manage hidden trips</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<div class="wrap">
+  <a class="back-link" href="index.html">&larr; All holidays</a>
+  <div id="content"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/data.js"></script>
+<script>
+const content = document.getElementById("content");
+
+function askPasscode() {
+  content.innerHTML = `
+    <div class="card">
+      <h2>Enter passcode</h2>
+      <p style="color:var(--text-secondary); font-size:13px; margin-bottom:10px;">This page manages trips hidden from the main page.</p>
+      <input id="pass" type="password" placeholder="Passcode" />
+      <button class="primary" id="passBtn" style="margin-top:10px;">Enter</button>
+    </div>
+  `;
+  document.getElementById("passBtn").onclick = () => {
+    const val = document.getElementById("pass").value;
+    if (val === ADMIN_PASSCODE) {
+      sessionStorage.setItem("hp_admin", "1");
+      loadAll();
+    } else {
+      alert("Incorrect passcode.");
+    }
+  };
+}
+
+async function loadAll() {
+  content.innerHTML = "<p class='empty'>Loading...</p>";
+  try {
+    const trips = await HolidayData.listHolidays();
+    if (trips.length === 0) {
+      content.innerHTML = "<p class='empty'>No holidays yet.</p>";
+      return;
+    }
+    content.innerHTML = "<h1 style='margin-bottom:1rem;'>All trips (including hidden)</h1>";
+    trips.forEach(t => {
+      const now = new Date();
+      const hidden = t.is_secret && t.reveal_at && now < new Date(t.reveal_at);
+      const el = document.createElement("a");
+      el.className = "trip-link";
+      el.style.marginBottom = "10px";
+      el.href = `trip.html?id=${t.id}&admin=1`;
+      el.innerHTML = `
+        <div class="row" style="justify-content:space-between; align-items:center;">
+          <h3>${t.name}</h3>
+          ${hidden ? '<span class="badge">Hidden until reveal</span>' : t.is_secret ? '<span class="badge">Revealed</span>' : ''}
+        </div>
+        <div class="dest">${t.destination || ""}</div>
+        <div class="dates">${formatDate(t.depart_date)} — ${formatDate(t.return_date)}</div>
+        ${t.reveal_at ? `<div class="dates" style="margin-top:4px;">Reveals: ${new Date(t.reveal_at).toLocaleString("en-GB")}</div>` : ""}
+      `;
+      content.appendChild(el);
+    });
+  } catch (e) {
+    content.innerHTML = `<p class='empty'>Couldn't load trips: ${e.message}</p>`;
+  }
+}
+
+if (sessionStorage.getItem("hp_admin") === "1") {
+  loadAll();
+} else {
+  askPasscode();
+}
+</script>
+</body>
+</html>

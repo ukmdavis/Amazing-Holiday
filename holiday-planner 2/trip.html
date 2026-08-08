@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Trip details</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<div class="wrap">
+  <a class="back-link" href="index.html">&larr; All holidays</a>
+  <div id="content"><p class="empty">Loading...</p></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/data.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const tripId = params.get("id");
+const content = document.getElementById("content");
+
+function isAdmin() {
+  if (sessionStorage.getItem("hp_admin") === "1") return true;
+  if (params.get("admin") === "1") {
+    const val = prompt("Enter passcode to view/edit this trip early:");
+    if (val === ADMIN_PASSCODE) {
+      sessionStorage.setItem("hp_admin", "1");
+      return true;
+    }
+  }
+  return false;
+}
+
+async function main() {
+  if (!tripId) { content.innerHTML = "<p class='empty'>No trip specified.</p>"; return; }
+
+  let trip;
+  try {
+    trip = await HolidayData.getHoliday(tripId);
+  } catch (e) {
+    content.innerHTML = `<p class='empty'>Couldn't load trip: ${e.message}</p>`;
+    return;
+  }
+
+  const admin = params.get("admin") === "1" ? isAdmin() : false;
+
+  if (trip.is_secret && trip.reveal_at && new Date() < new Date(trip.reveal_at) && !admin) {
+    renderLockScreen(trip);
+    return;
+  }
+
+  renderTrip(trip, admin);
+}
+
+function renderLockScreen(trip) {
+  const reveal = new Date(trip.reveal_at);
+  content.innerHTML = `
+    <div class="card lock-screen">
+      <div class="icon">🎁</div>
+      <h2>Something special is coming</h2>
+      <p style="color:var(--text-secondary); margin-top:8px;">Details for this trip unlock on</p>
+      <p style="font-weight:600; margin-top:4px;">${reveal.toLocaleString("en-GB", { weekday:"long", day:"numeric", month:"long", hour:"2-digit", minute:"2-digit" })}</p>
+      <div class="countdown-num" id="countdown"></div>
+    </div>
+  `;
+  const el = document.getElementById("countdown");
+  function tick() {
+    const diff = reveal - new Date();
+    if (diff <= 0) { location.reload(); return; }
+    const d = Math.floor(diff / 86400000);
+    const h = Math.floor((diff % 86400000) / 3600000);
+    const m = Math.floor((diff % 3600000) / 60000);
+    el.textContent = d > 0 ? `${d}d ${h}h ${m}m` : `${h}h ${m}m`;
+  }
+  tick();
+  setInterval(tick, 60000);
+}
+
+async function renderTrip(trip, admin) {
+  const daysUntil = daysBetween(new Date(), trip.depart_date);
+  content.innerHTML = `
+    ${admin ? `<div class="badge" style="margin-bottom:10px; display:inline-block;">Admin view — viewing early</div>` : ""}
+    <div class="card" id="headerCard">
+      <div class="row" style="justify-content:space-between; align-items:start;">
+        <div>
+          <h2>${trip.name}</h2>
+          <p style="color:var(--text-secondary); font-size:13px; margin-top:2px;">${trip.destination || ""}</p>
+          <p style="color:var(--text-secondary); font-size:13px; margin-top:6px;">${formatDate(trip.depart_date)} — ${formatDate(trip.return_date)}</p>
+          ${trip.is_secret ? `<p style="font-size:13px; margin-top:6px;"><span class="badge">Surprise</span> reveals ${new Date(trip.reveal_at).toLocaleString("en-GB")}</p>` : ""}
+        </div>
+        <div class="row">
+          <button id="editTripBtn">Edit</button>
+          <button class="danger" id="deleteTripBtn">Delete</button>
+        </div>
+      </div>
+      <div id="editTripForm" style="display:none; margin-top:14px; border-top:1px solid var(--border); padding-top:14px;"></div>
+    </div>
+    <div class="countdown-banner">${daysUntil > 0 ? daysUntil + " days until departure" : daysUntil === 0 ? "Departs today!" : "Trip in progress or past"}</div>
+
+    <div class="section-title">Flights</div>
+    <div id="flightsList"></div>
+    <button id="addFlightBtn">+ Add flight</button>
+    <div class="card" id="flightForm" style="display:none; margin-top:10px;"></div>
+
+    <div class="section-title">Accommodation</div>
+    <div id="staysList"></div>
+    <button id="addStayBtn">+ Add stay</button>
+    <div class="card" id="stayForm" style="display:none; margin-top:10px;"></div>
+
+    <div class="section-title">Day by day — tasks &amp; notes</div>
+    <p class="empty" style="margin-bottom:10px;">Covers the run-up to departure and the trip itself, so you can plan ahead for both.</p>
+    <div id="dayTimeline"></div>
+  `;
+
+  document.getElementById("deleteTripBtn").onclick = async () => {
+    if (!confirm("Delete this holiday and everything in it?")) return;
+    await HolidayData.deleteHoliday(trip.id);
+    location.href = "index.html";
+  };
+
+  document.getElementById("editTripBtn").onclick = () => toggleEditTripForm(trip);
+  document.getElementById("addFlightBtn").onclick = () => toggleFlightForm(trip.id);
+  document.getElementById("addStayBtn").onclick = () => toggleStayForm(trip.id);
+
+  await loadFlights(trip.id);
+  await loadStays(trip.id);
+  await loadTimeline(trip);
+}
+
+function toggleEditTripForm(trip) {
+  const form = document.getElementById("editTripForm");
+  if (form.style.display === "block") { form.style.display = "none"; return; }
+  form.style.display = "block";
+  const revealLocal = trip.reveal_at ? new Date(trip.reveal_at).toISOString().slice(0,16) : "";
+  form.innerHTML = `
+    <label>Name</label>
+    <input id="et-name" value="${trip.name || ""}" />
+    <label>Destination</label>
+    <input id="et-destination" value="${trip.destination || ""}" />
+    <div class="grid-2">
+      <div><label>Depart date</label><input id="et-depart" type="date" value="${trip.depart_date || ""}" /></div>
+      <div><label>Return date</label><input id="et-return" type="date" value="${trip.return_date || ""}" /></div>
+    </div>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
+      <input type="checkbox" id="et-secret" ${trip.is_secret ? "checked" : ""} style="width:auto;" />
+      This is a surprise (hide from main page until reveal date)
+    </label>
+    <div id="et-revealWrap" style="display:${trip.is_secret ? "block" : "none"};">
+      <label>Reveal date &amp; time</label>
+      <input id="et-reveal" type="datetime-local" value="${revealLocal}" />
+    </div>
+    <div class="row" style="margin-top:14px;">
+      <button class="primary" id="et-save">Save changes</button>
+      <button id="et-cancel">Cancel</button>
+    </div>
+  `;
+  document.getElementById("et-secret").onchange = (e) => {
+    document.getElementById("et-revealWrap").style.display = e.target.checked ? "block" : "none";
+  };
+  document.getElementById("et-cancel").onclick = () => { form.style.display = "none"; };
+  document.getElementById("et-save").onclick = async () => {
+    const is_secret = document.getElementById("et-secret").checked;
+    const reveal_at = is_secret ? document.getElementById("et-reveal").value : null;
+    if (is_secret && !reveal_at) { alert("Please set a reveal date and time."); return; }
+    await HolidayData.updateHoliday(trip.id, {
+      name: document.getElementById("et-name").value.trim(),
+      destination: document.getElementById("et-destination").value.trim(),
+      depart_date: document.getElementById("et-depart").value,
+      return_date: document.getElementById("et-return").value,
+      is_secret,
+      reveal_at,
+    });
+    location.reload();
+  };
+}
+
+// ---------- Flights ----------
+function toggleFlightForm(tripId) {
+  const form = document.getElementById("flightForm");
+  if (form.style.display === "block") { form.style.display = "none"; return; }
+  form.style.display = "block";
+  form.innerHTML = `
+    <label>Direction</label>
+    <select id="fl-direction"><option>Outbound</option><option>Return</option></select>
+    <div class="grid-2">
+      <div><label>Airline</label><input id="fl-airline" placeholder="e.g. Lufthansa" /></div>
+      <div><label>Flight number</label><input id="fl-number" placeholder="e.g. LH923" /></div>
+    </div>
+    <div class="grid-2">
+      <div><label>From airport</label><input id="fl-from" placeholder="e.g. MAN" /></div>
+      <div><label>To airport</label><input id="fl-to" placeholder="e.g. FRA" /></div>
+    </div>
+    <div class="grid-2">
+      <div><label>Depart date &amp; time</label><input id="fl-depart" type="datetime-local" /></div>
+      <div><label>Arrive date &amp; time</label><input id="fl-arrive" type="datetime-local" /></div>
+    </div>
+    <label>Notes</label>
+    <input id="fl-notes" placeholder="Seat numbers, terminal, etc." />
+    <div class="row" style="margin-top:12px;">
+      <button class="primary" id="fl-save">Save flight</button>
+    </div>
+  `;
+  document.getElementById("fl-save").onclick = async () => {
+    await HolidayData.addFlight({
+      holiday_id: tripId,
+      direction: document.getElementById("fl-direction").value,
+      airline: document.getElementById("fl-airline").value,
+      flight_number: document.getElementById("fl-number").value,
+      from_airport: document.getElementById("fl-from").value,
+      to_airport: document.getElementById("fl-to").value,
+      depart_at: document.getElementById("fl-depart").value || null,
+      arrive_at: document.getElementById("fl-arrive").value || null,
+      notes: document.getElementById("fl-notes").value,
+    });
+    form.style.display = "none";
+    loadFlights(tripId);
+  };
+}
+
+async function loadFlights(tripId) {
+  const list = document.getElementById("flightsList");
+  const flights = await HolidayData.listFlights(tripId);
+  if (flights.length === 0) { list.innerHTML = "<p class='empty'>No flights added yet.</p>"; return; }
+  list.innerHTML = "";
+  flights.forEach(f => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="field-row" style="align-items:start;">
+        <div>
+          <span class="badge">${f.direction || ""}</span>
+          <h3 style="margin-top:6px;">${f.airline || ""} ${f.flight_number || ""}</h3>
+          <p style="font-size:13px; color:var(--text-secondary); margin-top:4px;">${f.from_airport || "?"} → ${f.to_airport || "?"}</p>
+          <p style="font-size:13px; color:var(--text-secondary); margin-top:4px;">${formatDateTime(f.depart_at)} → ${formatDateTime(f.arrive_at)}</p>
+          ${f.notes ? `<p style="font-size:13px; margin-top:4px;">${f.notes}</p>` : ""}
+        </div>
+        <div class="row" style="flex-shrink:0;">
+          <button class="edit-btn">Edit</button>
+          <button class="ghost del-btn">✕</button>
+        </div>
+      </div>
+      <div class="editRow" style="display:none; margin-top:12px; border-top:1px solid var(--border); padding-top:12px;"></div>
+    `;
+    card.querySelector(".del-btn").onclick = async () => { await HolidayData.deleteFlight(f.id); loadFlights(tripId); };
+    card.querySelector(".edit-btn").onclick = () => toggleFlightEdit(card, f, tripId);
+    list.appendChild(card);
+  });
+}
+
+function toggleFlightEdit(card, f, tripId) {
+  const row = card.querySelector(".editRow");
+  if (row.style.display === "block") { row.style.display = "none"; return; }
+  row.style.display = "block";
+  row.innerHTML = `
+    <label>Direction</label>
+    <select id="efl-direction"><option ${f.direction==="Outbound"?"selected":""}>Outbound</option><option ${f.direction==="Return"?"selected":""}>Return</option></select>
+    <div class="grid-2">
+      <div><label>Airline</label><input id="efl-airline" value="${f.airline||""}" /></div>
+      <div><label>Flight number</label><input id="efl-number" value="${f.flight_number||""}" /></div>
+    </div>
+    <div class="grid-2">
+      <div><label>From airport</label><input id="efl-from" value="${f.from_airport||""}" /></div>
+      <div><label>To airport</label><input id="efl-to" value="${f.to_airport||""}" /></div>
+    </div>
+    <div class="grid-2">
+      <div><label>Depart date &amp; time</label><input id="efl-depart" type="datetime-local" value="${f.depart_at ? f.depart_at.slice(0,16) : ""}" /></div>
+      <div><label>Arrive date &amp; time</label><input id="efl-arrive" type="datetime-local" value="${f.arrive_at ? f.arrive_at.slice(0,16) : ""}" /></div>
+    </div>
+    <label>Notes</label>
+    <input id="efl-notes" value="${f.notes||""}" />
+    <div class="row" style="margin-top:12px;">
+      <button class="primary" id="efl-save">Save</button>
+    </div>
+  `;
+  row.querySelector("#efl-save").onclick = async () => {
+    await HolidayData.updateFlight(f.id, {
+      direction: row.querySelector("#efl-direction").value,
+      airline: row.querySelector("#efl-airline").value,
+      flight_number: row.querySelector("#efl-number").value,
+      from_airport: row.querySelector("#efl-from").value,
+      to_airport: row.querySelector("#efl-to").value,
+      depart_at: row.querySelector("#efl-depart").value || null,
+      arrive_at: row.querySelector("#efl-arrive").value || null,
+      notes: row.querySelector("#efl-notes").value,
+    });
+    loadFlights(tripId);
+  };
+}
+
+// ---------- Stays ----------
+function toggleStayForm(tripId) {
+  const form = document.getElementById("stayForm");
+  if (form.style.display === "block") { form.style.display = "none"; return; }
+  form.style.display = "block";
+  form.innerHTML = `
+    <label>Name</label>
+    <input id="st-name" placeholder="e.g. Leleaf Guesthouse" />
+    <label>Address</label>
+    <input id="st-address" placeholder="Full address" />
+    <div class="grid-2">
+      <div><label>Check-in</label><input id="st-checkin" type="date" /></div>
+      <div><label>Check-out</label><input id="st-checkout" type="date" /></div>
+    </div>
+    <label>Notes</label>
+    <textarea id="st-notes" placeholder="Booking ref, contact, etc."></textarea>
+    <div class="row" style="margin-top:12px;">
+      <button class="primary" id="st-save">Save stay</button>
+    </div>
+  `;
+  document.getElementById("st-save").onclick = async () => {
+    await HolidayData.addStay({
+      holiday_id: tripId,
+      name: document.getElementById("st-name").value,
+      address: document.getElementById("st-address").value,
+      checkin: document.getElementById("st-checkin").value || null,
+      checkout: document.getElementById("st-checkout").value || null,
+      notes: document.getElementById("st-notes").value,
+    });
+    form.style.display = "none";
+    loadStays(tripId);
+  };
+}
+
+async function loadStays(tripId) {
+  const list = document.getElementById("staysList");
+  const stays = await HolidayData.listStays(tripId);
+  if (stays.length === 0) { list.innerHTML = "<p class='empty'>No accommodation added yet.</p>"; return; }
+  list.innerHTML = "";
+  stays.forEach(s => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="field-row" style="align-items:start;">
+        <div>
+          <h3>${s.name || ""}</h3>
+          <p style="font-size:13px; color:var(--text-secondary); margin-top:4px;">${s.address || ""}</p>
+          <p style="font-size:13px; color:var(--text-secondary); margin-top:4px;">${formatDate(s.checkin)} — ${formatDate(s.checkout)}</p>
+          ${s.notes ? `<p style="font-size:13px; margin-top:4px;">${s.notes}</p>` : ""}
+        </div>
+        <div class="row" style="flex-shrink:0;">
+          <button class="edit-btn">Edit</button>
+          <button class="ghost del-btn">✕</button>
+        </div>
+      </div>
+      <div class="editRow" style="display:none; margin-top:12px; border-top:1px solid var(--border); padding-top:12px;"></div>
+    `;
+    card.querySelector(".del-btn").onclick = async () => { await HolidayData.deleteStay(s.id); loadStays(tripId); };
+    card.querySelector(".edit-btn").onclick = () => toggleStayEdit(card, s, tripId);
+    list.appendChild(card);
+  });
+}
+
+function toggleStayEdit(card, s, tripId) {
+  const row = card.querySelector(".editRow");
+  if (row.style.display === "block") { row.style.display = "none"; return; }
+  row.style.display = "block";
+  row.innerHTML = `
+    <label>Name</label>
+    <input id="est-name" value="${s.name||""}" />
+    <label>Address</label>
+    <input id="est-address" value="${s.address||""}" />
+    <div class="grid-2">
+      <div><label>Check-in</label><input id="est-checkin" type="date" value="${s.checkin||""}" /></div>
+      <div><label>Check-out</label><input id="est-checkout" type="date" value="${s.checkout||""}" /></div>
+    </div>
+    <label>Notes</label>
+    <textarea id="est-notes">${s.notes||""}</textarea>
+    <div class="row" style="margin-top:12px;">
+      <button class="primary" id="est-save">Save</button>
+    </div>
+  `;
+  row.querySelector("#est-save").onclick = async () => {
+    await HolidayData.updateStay(s.id, {
+      name: row.querySelector("#est-name").value,
+      address: row.querySelector("#est-address").value,
+      checkin: row.querySelector("#est-checkin").value || null,
+      checkout: row.querySelector("#est-checkout").value || null,
+      notes: row.querySelector("#est-notes").value,
+    });
+    loadStays(tripId);
+  };
+}
+
+// ---------- Day by day timeline (covers run-up AND the holiday itself) ----------
+async function loadTimeline(trip) {
+  const wrap = document.getElementById("dayTimeline");
+  const items = await HolidayData.listDayItems(trip.id);
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  const depart = new Date(trip.depart_date);
+  const returnD = new Date(trip.return_date);
+
+  // Start from today (or a few days back for context if the trip's underway),
+  // but don't go further back than ~45 days before departure for a future trip.
+  let start = new Date(Math.min(today.getTime(), depart.getTime()));
+  const spanBeforeDepart = daysBetween(start, depart);
+  if (spanBeforeDepart > 45) start = new Date(depart.getTime() - 45 * 86400000);
+
+  const end = returnD >= start ? returnD : start; // always show at least through return date
+  const todayStr = today.toISOString().split("T")[0];
+  const departStr = trip.depart_date;
+
+  const days = [];
+  let cursor = new Date(start);
+  while (cursor <= end) {
+    days.push(cursor.toISOString().split("T")[0]);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  wrap.innerHTML = "";
+  days.forEach(dateStr => {
+    const dayItems = items.filter(i => i.item_date === dateStr);
+    const isToday = dateStr === todayStr;
+    const daysOut = daysBetween(dateStr, trip.depart_date);
+    const onTrip = dateStr >= departStr;
+    const card = document.createElement("div");
+    card.className = "card day-card" + (isToday ? " today" : "");
+    let itemsHtml = "";
+    dayItems.forEach(item => {
+      if (item.type === "task") {
+        itemsHtml += `
+          <div class="item-row ${item.done ? "done" : ""}">
+            <input type="checkbox" ${item.done ? "checked" : ""} class="task-toggle" data-id="${item.id}" />
+            <span class="item-text" data-id="${item.id}" data-current="${item.text.replace(/"/g,'&quot;')}">${item.text}</span>
+            <button class="ghost item-delete" data-id="${item.id}">✕</button>
+          </div>`;
+      } else {
+        itemsHtml += `
+          <div class="note-block" data-id="${item.id}" data-current="${item.text.replace(/"/g,'&quot;')}">
+            ${item.text}
+            <div style="text-align:right; margin-top:4px;"><button class="ghost item-delete" data-id="${item.id}" style="font-size:11px;">Remove</button></div>
+          </div>`;
+      }
+    });
+    card.innerHTML = `
+      <div class="field-row">
+        <div>
+          <div class="date-label">${formatDate(dateStr, { weekday: "short", day: "numeric", month: "short" })}</div>
+          <div class="days-out">${daysOut === 0 ? "Departure day" : daysOut > 0 ? daysOut + " days before departure" : onTrip ? "During your trip" : ""}</div>
+        </div>
+        ${onTrip ? '<span class="badge">Trip day</span>' : ''}
+      </div>
+      <div style="margin-top:8px;">${itemsHtml}</div>
+      <div class="row" style="margin-top:8px;">
+        <button class="add-task" data-date="${dateStr}">+ Task</button>
+        <button class="add-note" data-date="${dateStr}">+ Note</button>
+      </div>
+    `;
+    wrap.appendChild(card);
+  });
+
+  wrap.querySelectorAll(".task-toggle").forEach(cb => {
+    cb.onchange = async () => { await HolidayData.toggleTaskDone(cb.dataset.id, cb.checked); loadTimeline(trip); };
+  });
+  wrap.querySelectorAll(".item-delete").forEach(btn => {
+    btn.onclick = async () => { await HolidayData.deleteDayItem(btn.dataset.id); loadTimeline(trip); };
+  });
+  wrap.querySelectorAll(".item-text, .note-block").forEach(el => {
+    el.onclick = async (e) => {
+      if (e.target.tagName === "BUTTON") return;
+      const id = el.dataset.id;
+      const current = el.dataset.current;
+      const text = prompt("Edit:", current);
+      if (text === null || text === "") return;
+      await HolidayData.updateDayItemText(id, text);
+      loadTimeline(trip);
+    };
+  });
+  wrap.querySelectorAll(".add-task").forEach(btn => {
+    btn.onclick = async () => {
+      const text = prompt("Task:");
+      if (!text) return;
+      await HolidayData.addDayItem({ holiday_id: trip.id, item_date: btn.dataset.date, type: "task", text });
+      loadTimeline(trip);
+    };
+  });
+  wrap.querySelectorAll(".add-note").forEach(btn => {
+    btn.onclick = async () => {
+      const text = prompt("Note:");
+      if (!text) return;
+      await HolidayData.addDayItem({ holiday_id: trip.id, item_date: btn.dataset.date, type: "note", text });
+      loadTimeline(trip);
+    };
+  });
+}
+
+main();
+</script>
+</body>
+</html>
