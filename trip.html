@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Trip details</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<div class="wrap">
+  <a class="back-link" href="index.html">&larr; All holidays</a>
+  <div id="content"><p class="empty">Loading...</p></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/data.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const tripId = params.get("id");
+const content = document.getElementById("content");
+
+async function main() {
+  if (!tripId) { content.innerHTML = "<p class='empty'>No trip specified.</p>"; return; }
+
+  let trip;
+  try {
+    trip = await HolidayData.getHoliday(tripId);
+  } catch (e) {
+    content.innerHTML = `<p class='empty'>Couldn't load trip: ${e.message}</p>`;
+    return;
+  }
+
+  if (trip.is_secret && new Date() < new Date(trip.reveal_at)) {
+    renderLockScreen(trip);
+    return;
+  }
+
+  renderTrip(trip);
+}
+
+function renderLockScreen(trip) {
+  const reveal = new Date(trip.reveal_at);
+  content.innerHTML = `
+    <div class="card lock-screen">
+      <div class="icon">🎁</div>
+      <h2>Something special is coming</h2>
+      <p style="color:var(--text-secondary); margin-top:8px;">Details for this trip unlock on</p>
+      <p style="font-weight:600; margin-top:4px;">${reveal.toLocaleString("en-GB", { weekday:"long", day:"numeric", month:"long", hour:"2-digit", minute:"2-digit" })}</p>
+      <div class="countdown-num" id="countdown"></div>
+    </div>
+  `;
+  const el = document.getElementById("countdown");
+  function tick() {
+    const diff = reveal - new Date();
+    if (diff <= 0) { location.reload(); return; }
+    const d = Math.floor(diff / 86400000);
+    const h = Math.floor((diff % 86400000) / 3600000);
+    const m = Math.floor((diff % 3600000) / 60000);
+    el.textContent = d > 0 ? `${d}d ${h}h ${m}m` : `${h}h ${m}m`;
+  }
+  tick();
+  setInterval(tick, 60000);
+}
+
+async function renderTrip(trip) {
+  const daysUntil = daysBetween(new Date(), trip.depart_date);
+  content.innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:start;">
+        <div>
+          <h2>${trip.name}</h2>
+          <p style="color:var(--text-secondary); font-size:13px; margin-top:2px;">${trip.destination || ""}</p>
+          <p style="color:var(--text-secondary); font-size:13px; margin-top:6px;">${formatDate(trip.depart_date)} — ${formatDate(trip.return_date)}</p>
+        </div>
+        <button class="danger" id="deleteTripBtn">Delete</button>
+      </div>
+    </div>
+    <div class="countdown-banner">${daysUntil > 0 ? daysUntil + " days until departure" : daysUntil === 0 ? "Departs today!" : "Trip in progress or past"}</div>
+
+    <div class="section-title">Flights</div>
+    <div id="flightsList"></div>
+    <button id="addFlightBtn">+ Add flight</button>
+    <div class="card" id="flightForm" style="display:none; margin-top:10px;"></div>
+
+    <div class="section-title">Accommodation</div>
+    <div id="staysList"></div>
+    <button id="addStayBtn">+ Add stay</button>
+    <div class="card" id="stayForm" style="display:none; margin-top:10px;"></div>
+
+    <div class="section-title">Day by day — tasks &amp; notes</div>
+    <div id="dayTimeline"></div>
+  `;
+
+  document.getElementById("deleteTripBtn").onclick = async () => {
+    if (!confirm("Delete this holiday and everything in it?")) return;
+    await HolidayData.deleteHoliday(trip.id);
+    location.href = "index.html";
+  };
+
+  document.getElementById("addFlightBtn").onclick = () => toggleFlightForm(trip.id);
+  document.getElementById("addStayBtn").onclick = () => toggleStayForm(trip.id);
+
+  await loadFlights(trip.id);
+  await loadStays(trip.id);
+  await loadTimeline(trip);
+}
+
+// ---------- Flights ----------
+function toggleFlightForm(tripId) {
+  const form = document.getElementById("flightForm");
+  if (form.style.display === "block") { form.style.display = "none"; return; }
+  form.style.display = "block";
+  form.innerHTML = `
+    <label>Direction</label>
+    <select id="fl-direction"><option>Outbound</option><option>Return</option></select>
+    <div class="grid-2">
+      <div><label>Airline</label><input id="fl-airline" placeholder="e.g. Lufthansa" /></div>
+      <div><label>Flight number</label><input id="fl-number" placeholder="e.g. LH923" /></div>
+    </div>
+    <div class="grid-2">
+      <div><label>From airport</label><input id="fl-from" placeholder="e.g. MAN" /></div>
+      <div><label>To airport</label><input id="fl-to" placeholder="e.g. FRA" /></div>
+    </div>
+    <div class="grid-2">
+      <div><label>Depart date &amp; time</label><input id="fl-depart" type="datetime-local" /></div>
+      <div><label>Arrive date &amp; time</label><input id="fl-arrive" type="datetime-local" /></div>
+    </div>
+    <label>Notes</label>
+    <input id="fl-notes" placeholder="Seat numbers, terminal, etc." />
+    <div class="row" style="margin-top:12px;">
+      <button class="primary" id="fl-save">Save flight</button>
+    </div>
+  `;
+  document.getElementById("fl-save").onclick = async () => {
+    await HolidayData.addFlight({
+      holiday_id: tripId,
+      direction: document.getElementById("fl-direction").value,
+      airline: document.getElementById("fl-airline").value,
+      flight_number: document.getElementById("fl-number").value,
+      from_airport: document.getElementById("fl-from").value,
+      to_airport: document.getElementById("fl-to").value,
+      depart_at: document.getElementById("fl-depart").value || null,
+      arrive_at: document.getElementById("fl-arrive").value || null,
+      notes: document.getElementById("fl-notes").value,
+    });
+    form.style.display = "none";
+    loadFlights(tripId);
+  };
+}
+
+async function loadFlights(tripId) {
+  const list = document.getElementById("flightsList");
+  const flights = await HolidayData.listFlights(tripId);
+  if (flights.length === 0) { list.innerHTML = "<p class='empty'>No flights added yet.</p>"; return; }
+  list.innerHTML = "";
+  flights.forEach(f => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="row" style="justify-content:space-between; align-items:start;">
+        <div>
+          <span class="badge">${f.direction || ""}</span>
+          <h3 style="margin-top:6px;">${f.airline || ""} ${f.flight_number || ""}</h3>
+          <p style="font-size:13px; color:var(--text-secondary); margin-top:4px;">${f.from_airport || "?"} → ${f.to_airport || "?"}</p>
+          <p style="font-size:13px; color:var(--text-secondary); margin-top:4px;">${formatDateTime(f.depart_at)} → ${formatDateTime(f.arrive_at)}</p>
+          ${f.notes ? `<p style="font-size:13px; margin-top:4px;">${f.notes}</p>` : ""}
+        </div>
+        <button class="ghost" data-id="${f.id}">✕</button>
+      </div>
+    `;
+    card.querySelector("button").onclick = async () => { await HolidayData.deleteFlight(f.id); loadFlights(tripId); };
+    list.appendChild(card);
+  });
+}
+
+// ---------- Stays ----------
+function toggleStayForm(tripId) {
+  const form = document.getElementById("stayForm");
+  if (form.style.display === "block") { form.style.display = "none"; return; }
+  form.style.display = "block";
+  form.innerHTML = `
+    <label>Name</label>
+    <input id="st-name" placeholder="e.g. Leleaf Guesthouse" />
+    <label>Address</label>
+    <input id="st-address" placeholder="Full address" />
+    <div class="grid-2">
+      <div><label>Check-in</label><input id="st-checkin" type="date" /></div>
+      <div><label>Check-out</label><input id="st-checkout" type="date" /></div>
+    </div>
+    <label>Notes</label>
+    <textarea id="st-notes" placeholder="Booking ref, contact, etc."></textarea>
+    <div class="row" style="margin-top:12px;">
+      <button class="primary" id="st-save">Save stay</button>
+    </div>
+  `;
+  document.getElementById("st-save").onclick = async () => {
+    await HolidayData.addStay({
+      holiday_id: tripId,
+      name: document.getElementById("st-name").value,
+      address: document.getElementById("st-address").value,
+      checkin: document.getElementById("st-checkin").value || null,
+      checkout: document.getElementById("st-checkout").value || null,
+      notes: document.getElementById("st-notes").value,
+    });
+    form.style.display = "none";
+    loadStays(tripId);
+  };
+}
+
+async function loadStays(tripId) {
+  const list = document.getElementById("staysList");
+  const stays = await HolidayData.listStays(tripId);
+  if (stays.length === 0) { list.innerHTML = "<p class='empty'>No accommodation added yet.</p>"; return; }
+  list.innerHTML = "";
+  stays.forEach(s => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="row" style="justify-content:space-between; align-items:start;">
+        <div>
+          <h3>${s.name || ""}</h3>
+          <p style="font-size:13px; color:var(--text-secondary); margin-top:4px;">${s.address || ""}</p>
+          <p style="font-size:13px; color:var(--text-secondary); margin-top:4px;">${formatDate(s.checkin)} — ${formatDate(s.checkout)}</p>
+          ${s.notes ? `<p style="font-size:13px; margin-top:4px;">${s.notes}</p>` : ""}
+        </div>
+        <button class="ghost" data-id="${s.id}">✕</button>
+      </div>
+    `;
+    card.querySelector("button").onclick = async () => { await HolidayData.deleteStay(s.id); loadStays(tripId); };
+    list.appendChild(card);
+  });
+}
+
+// ---------- Day by day timeline ----------
+async function loadTimeline(trip) {
+  const wrap = document.getElementById("dayTimeline");
+  const items = await HolidayData.listDayItems(trip.id);
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  const depart = new Date(trip.depart_date);
+  let start = new Date(today);
+  const spanDays = daysBetween(today, depart);
+  // Show from today (or 14 days before departure if trip already close/past) up to departure, capped at 45 days shown
+  if (spanDays > 45) start = new Date(depart.getTime() - 45 * 86400000);
+  if (spanDays < 0) start = new Date(depart.getTime() - 7 * 86400000); // past trip: just show last week context
+
+  const todayStr = today.toISOString().split("T")[0];
+  const days = [];
+  let cursor = new Date(start);
+  while (cursor <= depart) {
+    days.push(cursor.toISOString().split("T")[0]);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  wrap.innerHTML = "";
+  days.forEach(dateStr => {
+    const dayItems = items.filter(i => i.item_date === dateStr);
+    const isToday = dateStr === todayStr;
+    const daysOut = daysBetween(dateStr, trip.depart_date);
+    const card = document.createElement("div");
+    card.className = "card day-card" + (isToday ? " today" : "");
+    let itemsHtml = "";
+    dayItems.forEach(item => {
+      if (item.type === "task") {
+        itemsHtml += `
+          <div class="item-row ${item.done ? "done" : ""}" data-id="${item.id}">
+            <input type="checkbox" ${item.done ? "checked" : ""} class="task-toggle" data-id="${item.id}" />
+            <span style="flex:1;">${item.text}</span>
+            <button class="ghost item-delete" data-id="${item.id}">✕</button>
+          </div>`;
+      } else {
+        itemsHtml += `
+          <div class="note-block">
+            ${item.text}
+            <div style="text-align:right; margin-top:4px;"><button class="ghost item-delete" data-id="${item.id}" style="font-size:11px;">Remove</button></div>
+          </div>`;
+      }
+    });
+    card.innerHTML = `
+      <div class="date-label">${formatDate(dateStr, { weekday: "short", day: "numeric", month: "short" })}</div>
+      <div class="days-out">${daysOut === 0 ? "Departure day" : daysOut > 0 ? daysOut + " days before departure" : "During/after trip"}</div>
+      <div style="margin-top:8px;">${itemsHtml}</div>
+      <div class="row" style="margin-top:8px;">
+        <button class="add-task" data-date="${dateStr}">+ Task</button>
+        <button class="add-note" data-date="${dateStr}">+ Note</button>
+      </div>
+    `;
+    wrap.appendChild(card);
+  });
+
+  wrap.querySelectorAll(".task-toggle").forEach(cb => {
+    cb.onchange = async () => { await HolidayData.toggleTaskDone(cb.dataset.id, cb.checked); loadTimeline(trip); };
+  });
+  wrap.querySelectorAll(".item-delete").forEach(btn => {
+    btn.onclick = async () => { await HolidayData.deleteDayItem(btn.dataset.id); loadTimeline(trip); };
+  });
+  wrap.querySelectorAll(".add-task").forEach(btn => {
+    btn.onclick = async () => {
+      const text = prompt("Task:");
+      if (!text) return;
+      await HolidayData.addDayItem({ holiday_id: trip.id, item_date: btn.dataset.date, type: "task", text });
+      loadTimeline(trip);
+    };
+  });
+  wrap.querySelectorAll(".add-note").forEach(btn => {
+    btn.onclick = async () => {
+      const text = prompt("Note:");
+      if (!text) return;
+      await HolidayData.addDayItem({ holiday_id: trip.id, item_date: btn.dataset.date, type: "note", text });
+      loadTimeline(trip);
+    };
+  });
+}
+
+main();
+</script>
+</body>
+</html>
